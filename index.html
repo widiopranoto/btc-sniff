@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BTC Real-Time Aggregator</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .header-title {
+            color: #888;
+            font-size: 1.2rem;
+            margin-bottom: 5px;
+        }
+        .main-price-container {
+            background: linear-gradient(145deg, #1e1e1e, #2a2a2a);
+            padding: 30px 60px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            text-align: center;
+            margin-bottom: 40px;
+            border: 1px solid #333;
+        }
+        .main-price {
+            font-size: 4rem;
+            font-weight: bold;
+            color: #00e676;
+            margin: 10px 0;
+            font-family: monospace;
+        }
+        .active-sources {
+            color: #aaa;
+            font-size: 0.9rem;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            width: 100%;
+            max-width: 1000px;
+        }
+        .card {
+            background-color: #1e1e1e;
+            padding: 20px;
+            border-radius: 10px;
+            border: 1px solid #333;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .exchange-name {
+            font-size: 1.2rem;
+            font-weight: bold;
+        }
+        .status {
+            padding: 4px 8px;
+            border-radius: 5px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+        .status.online { background-color: rgba(0, 230, 118, 0.2); color: #00e676; }
+        .status.lagging { background-color: rgba(255, 152, 0, 0.2); color: #ff9800; }
+        .status.offline { background-color: rgba(244, 67, 54, 0.2); color: #f44336; }
+        
+        .exchange-price {
+            font-size: 2rem;
+            font-family: monospace;
+        }
+        .update-time {
+            font-size: 0.8rem;
+            color: #666;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header-title">HARGA TENGAH (MEDIAN) BTC/USD</div>
+    <div class="main-price-container">
+        <div class="main-price" id="medianPrice">Loading...</div>
+        <div class="active-sources" id="activeSourcesCount">Menunggu data...</div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <div class="card-header">
+                <span class="exchange-name">Binance</span>
+                <span class="status offline" id="status-binance">Connecting</span>
+            </div>
+            <div class="exchange-price" id="price-binance">--</div>
+            <div class="update-time" id="time-binance">--</div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <span class="exchange-name">Coinbase</span>
+                <span class="status offline" id="status-coinbase">Connecting</span>
+            </div>
+            <div class="exchange-price" id="price-coinbase">--</div>
+            <div class="update-time" id="time-coinbase">--</div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <span class="exchange-name">Kraken</span>
+                <span class="status offline" id="status-kraken">Connecting</span>
+            </div>
+            <div class="exchange-price" id="price-kraken">--</div>
+            <div class="update-time" id="time-kraken">--</div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <span class="exchange-name">Bitfinex</span>
+                <span class="status offline" id="status-bitfinex">Connecting</span>
+            </div>
+            <div class="exchange-price" id="price-bitfinex">--</div>
+            <div class="update-time" id="time-bitfinex">--</div>
+        </div>
+    </div>
+
+    <script>
+        // Objek untuk menyimpan data harga dan waktu update terakhir dari setiap bursa
+        const marketData = {
+            binance: { price: null, lastUpdate: 0 },
+            coinbase: { price: null, lastUpdate: 0 },
+            kraken: { price: null, lastUpdate: 0 },
+            bitfinex: { price: null, lastUpdate: 0 }
+        };
+
+        // Format angka ke format mata uang USD
+        const formatter = new Intl.NumberFormat('en-US', {
+            style: 'currency',
+            currency: 'USD',
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        });
+
+        // Fungsi untuk mencari nilai tengah (Median)
+        // Median lebih baik dari Rata-rata (Average) karena kebal terhadap harga anomali (flash crash) di satu bursa
+        function calculateMedian(values) {
+            if (values.length === 0) return 0;
+            values.sort((a, b) => a - b);
+            const half = Math.floor(values.length / 2);
+            if (values.length % 2 !== 0) {
+                return values[half];
+            }
+            return (values[half - 1] + values[half]) / 2.0;
+        }
+
+        // ==========================================
+        // KONEKSI WEBSOCKET KE BERBAGAI BURSA
+        // ==========================================
+
+        // 1. Binance WebSocket
+        const wsBinance = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@ticker');
+        wsBinance.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            marketData.binance.price = parseFloat(data.c); // 'c' adalah current close price
+            marketData.binance.lastUpdate = Date.now();
+        };
+
+        // 2. Coinbase WebSocket
+        const wsCoinbase = new WebSocket('wss://ws-feed.exchange.coinbase.com');
+        wsCoinbase.onopen = () => {
+            wsCoinbase.send(JSON.stringify({
+                "type": "subscribe",
+                "channels": [{"name": "ticker", "product_ids": ["BTC-USD"]}]
+            }));
+        };
+        wsCoinbase.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'ticker' && data.price) {
+                marketData.coinbase.price = parseFloat(data.price);
+                marketData.coinbase.lastUpdate = Date.now();
+            }
+        };
+
+        // 3. Kraken WebSocket
+        const wsKraken = new WebSocket('wss://ws.kraken.com');
+        wsKraken.onopen = () => {
+            wsKraken.send(JSON.stringify({
+                "event": "subscribe",
+                "pair": ["XBT/USD"], // Kraken menggunakan XBT untuk BTC
+                "subscription": {"name": "ticker"}
+            }));
+        };
+        wsKraken.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (Array.isArray(data) && data[1] && data[1].c) {
+                marketData.kraken.price = parseFloat(data[1].c[0]);
+                marketData.kraken.lastUpdate = Date.now();
+            }
+        };
+
+        // 4. Bitfinex WebSocket
+        const wsBitfinex = new WebSocket('wss://api-pub.bitfinex.com/ws/2');
+        wsBitfinex.onopen = () => {
+            wsBitfinex.send(JSON.stringify({
+                event: 'subscribe',
+                channel: 'ticker',
+                symbol: 'tBTCUSD'
+            }));
+        };
+        wsBitfinex.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            // Bitfinex mengirim array, index 6 adalah harga terakhir (LAST_PRICE)
+            if (Array.isArray(data) && data[1] !== 'hb' && data[1].length > 6) {
+                marketData.bitfinex.price = parseFloat(data[1][6]);
+                marketData.bitfinex.lastUpdate = Date.now();
+            }
+        };
+
+        // ==========================================
+        // ENGINE UPDATE UI (Berjalan setiap 1 detik)
+        // ==========================================
+        
+        setInterval(() => {
+            const now = Date.now();
+            const validPrices = [];
+            
+            // Batas waktu untuk dianggap "Lagging" (misal: 4000 milidetik / 4 detik)
+            const LAG_THRESHOLD = 4000; 
+
+            // Loop melalui semua data bursa
+            for (const [exchange, data] of Object.entries(marketData)) {
+                const elPrice = document.getElementById(`price-${exchange}`);
+                const elStatus = document.getElementById(`status-${exchange}`);
+                const elTime = document.getElementById(`time-${exchange}`);
+
+                if (data.price !== null) {
+                    const timeDiff = now - data.lastUpdate;
+                    
+                    // Update teks harga di card masing-masing bursa
+                    elPrice.innerText = formatter.format(data.price);
+                    elTime.innerText = `Update: ${(timeDiff/1000).toFixed(1)} dtk lalu`;
+
+                    // Cek apakah data valid atau lagging
+                    if (timeDiff < LAG_THRESHOLD) {
+                        elStatus.className = 'status online';
+                        elStatus.innerText = 'Online';
+                        // Hanya masukkan harga ke perhitungan jika tidak lagging
+                        validPrices.push(data.price);
+                    } else {
+                        elStatus.className = 'status lagging';
+                        elStatus.innerText = 'Lagging';
+                    }
+                }
+            }
+
+            // Hitung Harga Tengah (Median) dari bursa yang valid saja
+            const elMedian = document.getElementById('medianPrice');
+            const elActiveCount = document.getElementById('activeSourcesCount');
+
+            if (validPrices.length > 0) {
+                const median = calculateMedian(validPrices);
+                elMedian.innerText = formatter.format(median);
+                elActiveCount.innerText = `Dihitung dari ${validPrices.length} sumber aktif`;
+            } else {
+                elMedian.innerText = "Mencari Data...";
+                elActiveCount.innerText = "Semua koneksi terputus atau lagging";
+            }
+
+        }, 1000); // 1000 ms = update UI setiap 1 detik
+    </script>
+</body>
+</html>
